@@ -115,12 +115,8 @@ contract LenderHarness {
         }
 
         // Check for `RESERVE` involvement, courier existence and self-reference
-        (address wallet, ) = LENDER.FACTORY().couriers(id);
-        if (
-            account == LENDER.RESERVE() ||
-            account == wallet ||
-            !alreadyEnrolledCourier[id]
-        ) {
+        (address wallet,) = LENDER.FACTORY().couriers(id);
+        if (account == LENDER.RESERVE() || account == wallet || !alreadyEnrolledCourier[id]) {
             vm.prank(msg.sender);
             vm.expectRevert(bytes("Aloe: courier"));
             LENDER.deposit(0, account, id);
@@ -237,8 +233,38 @@ contract LenderHarness {
         }
     }
 
-    /// @notice Redeems `shares` from `owner` and sends underlying assets to `recipient`
+    struct RedeemBeforeParams {
+        uint256 maxRedeem;
+        uint256 lastBalance;
+        uint256 totalSupply;
+        uint256 sharesBefore;
+        uint256 reservesBefore;
+        uint256 assetsBefore;
+        uint32 courierId;
+        address courier;
+        uint256 courierSharesBefore;
+        uint256 principleBefore;
+    }
+
     function redeem(uint112 shares, address recipient, address owner) public returns (uint256 amount) {
+        uint32 courierId = LENDER.courierOf(owner);
+        (address courier,) = LENDER.FACTORY().couriers(courierId);
+        RedeemBeforeParams memory params = RedeemBeforeParams(
+            LENDER.maxRedeem(owner),
+            LENDER.lastBalance(),
+            LENDER.totalSupply(),
+            LENDER.balanceOf(owner),
+            LENDER.balanceOf(LENDER.RESERVE()),
+            LENDER.asset().balanceOf(recipient),
+            courierId,
+            courier,
+            LENDER.balanceOf(courier),
+            LENDER.principleOf(owner)
+        );
+        performRedeem(shares, recipient, owner, params);
+    }
+
+    modifier validateRedeem(uint112 shares, address recipient, address owner) {
         // Check that `owner` actually has `shares`
         uint256 maxRedeem = LENDER.maxRedeem(owner);
         if (shares > maxRedeem) {
@@ -258,19 +284,18 @@ contract LenderHarness {
             vm.prank(owner);
             LENDER.approve(msg.sender, shares);
         }
+        _;
+    }
 
+    /// @notice Redeems `shares` from `owner` and sends underlying assets to `recipient`
+    function performRedeem(
+        uint112 shares,
+        address recipient,
+        address owner,
+        RedeemBeforeParams memory params
+    ) public validateRedeem(shares, recipient, owner) returns (uint256 amount) {
         // Collect data
         amount = LENDER.previewRedeem(shares);
-        uint256 lastBalance = LENDER.lastBalance();
-        uint256 totalSupply = LENDER.totalSupply();
-        uint256 sharesBefore = LENDER.balanceOf(owner);
-        uint256 reservesBefore = LENDER.balanceOf(LENDER.RESERVE());
-        uint256 assetsBefore = LENDER.asset().balanceOf(recipient);
-        uint32 courierId = LENDER.courierOf(owner);
-        (address courier, ) = LENDER.FACTORY().couriers(courierId);
-        uint256 courierSharesBefore = LENDER.balanceOf(courier);
-        uint256 principleBefore = LENDER.principleOf(owner);
-
         // Actual action
         if (amount == 0) {
             vm.prank(msg.sender);
@@ -283,28 +308,30 @@ contract LenderHarness {
         }
 
         // Collect more data
-        uint256 newReserves = LENDER.totalSupply() - (totalSupply - shares); // implicit assertion!
+        uint256 newReserves = LENDER.totalSupply() - (params.totalSupply - shares); // implicit assertion!
         uint256 reservesAfter = LENDER.balanceOf(LENDER.RESERVE());
-        uint256 fee = courierId == 0 ? 0 : LENDER.balanceOf(courier) - courierSharesBefore;
-        if (courier == LENDER.RESERVE()) fee -= newReserves;
+        uint256 fee = params.courierId == 0 ? 0 : LENDER.balanceOf(params.courier) - params.courierSharesBefore;
+        if (params.courier == LENDER.RESERVE()) fee -= newReserves;
 
         // Assertions
-        require(LENDER.principleOf(owner) <= principleBefore, "redeem: principle issue");
-        require(LENDER.lastBalance() == lastBalance - amount, "redeem: lastBalance mismatch");
+        require(LENDER.principleOf(owner) <= params.principleBefore, "redeem: principle issue");
+        require(LENDER.lastBalance() == params.lastBalance - amount, "redeem: lastBalance mismatch");
         if (recipient != address(LENDER)) {
-            require(LENDER.asset().balanceOf(recipient) == assetsBefore + amount, "redeem: transfer issue");
+            require(LENDER.asset().balanceOf(recipient) == params.assetsBefore + amount, "redeem: transfer issue");
         } else {
-            require(LENDER.asset().balanceOf(recipient) == assetsBefore, "redeem: bad self reference");
+            require(LENDER.asset().balanceOf(recipient) == params.assetsBefore, "redeem: bad self reference");
         }
         if (owner != LENDER.RESERVE()) {
-            require(LENDER.balanceOf(owner) == sharesBefore - shares - fee, "redeem: burn issue");
-            if (courier != LENDER.RESERVE()) {
-                require(reservesAfter == reservesBefore + newReserves, "redeem: reserves issue");
+            require(LENDER.balanceOf(owner) == params.sharesBefore - shares - fee, "redeem: burn issue");
+            if (params.courier != LENDER.RESERVE()) {
+                require(reservesAfter == params.reservesBefore + newReserves, "redeem: reserves issue");
             } else {
-                require(reservesAfter == reservesBefore + newReserves + fee, "redeem: reserves issue as courier");
+                require(reservesAfter == params.reservesBefore + newReserves + fee, "redeem: reserves issue as courier");
             }
         } else {
-            require(reservesAfter == reservesBefore + newReserves - shares - fee, "redeem: burn from RESERVE issue");
+            require(
+                reservesAfter == params.reservesBefore + newReserves - shares - fee, "redeem: burn from RESERVE issue"
+            );
         }
     }
 
